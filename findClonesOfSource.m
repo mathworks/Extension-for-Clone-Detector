@@ -25,10 +25,10 @@ function [cloneResults, status] = findClonesOfSource(sourceBlocksPath, targetSco
     cloneResults.Clones = 0;
     cloneResults.BlocksInAllClones = 0;
     clonePatterns = struct('ModelName', {}, 'ClonePattern', {});
-    targetScopeModelList = [];
+    targetScopeModelList = cellstr({});
     
     % onCleanup callback to remove added folders from path:
-    cleanupObjects = cell(1, length(targetScopeList));
+    cleanupObjects = {};
     % Get the current MATLAB search path
     searchPath = matlabpath;
     
@@ -39,33 +39,50 @@ function [cloneResults, status] = findClonesOfSource(sourceBlocksPath, targetSco
     for index = 1 : length(targetScopeList)
         fprintf('### %s: %s\n', "Clone Detection", "Collecting list of models from the target scope.");
         try
-            targetScopeModelFilesLocal = [];
+            targetScopeModelFilesLocal = {};
             if isfolder(targetScopeList{index})
                 folderPath = targetScopeList{index};
                 % Check if the folder path is in the search path
                 isInSearchPath = ismember(folderPath, pathList);
                 if ~(isInSearchPath) % When the folder path is not already in the search path
                     addpath(folderPath);
-                    cleanupObjects{index} = onCleanup(@() rmpath(folderPath));
+                    cleanupObjects{end+1} = onCleanup(@() rmpath(folderPath));
                 end
                 
-                dirData = dir(folderPath);
-                for i=1:length(dirData)
-                    if strcmp(dirData(i).name,'.') || strcmp(dirData(i).name,'..')
-                        continue;
+                % Get files and folders recursively in the "folderPath"
+                % directory
+                recursiveDirData = dir(fullfile(folderPath, '**', '*'));
+
+                % Add folders to the search path:
+                recursiveFoldersInTheDirectory = recursiveDirData([recursiveDirData.isdir]); % Get only folders
+                uniqueRecursiveFoldersInTheDirectory = unique({recursiveFoldersInTheDirectory.folder}');
+                for i = 1:length(uniqueRecursiveFoldersInTheDirectory)
+                    folderPathRecursive = uniqueRecursiveFoldersInTheDirectory{i}; % Get the current folder path
+                    isInSearchPathSub = ismember(folderPathRecursive, pathList);
+                    if ~(isInSearchPathSub) % When the folder path is not already in the search path
+                        addpath(folderPathRecursive);
+                        cleanupObjects{end+1} = onCleanup(@() rmpath(folderPathRecursive));
                     end
-                    if isfile([folderPath filesep dirData(i).name])
-                        [~, ~, ext] = fileparts(dirData(i).name);
+                end
+
+                % Add files to the search scope list
+                recursiveFilesInTheDirectory = recursiveDirData(~[recursiveDirData.isdir]); % Get only files
+                for fileIndex = 1:length(recursiveFilesInTheDirectory)
+                    fileFullPath = fullfile(recursiveFilesInTheDirectory(fileIndex).folder,...
+                        recursiveFilesInTheDirectory(fileIndex).name);
+                    if isfile(fileFullPath)
+                        [~, ~, ext] = fileparts(recursiveFilesInTheDirectory(fileIndex).name);
     
                         if ((strcmp(ext,'.slx') ||  strcmp(ext,'.mdl')) &&...
-                                                    ~(Simulink.MDLInfo([folderPath filesep dirData(i).name]).IsLibrary))
-                             targetScopeModelFilesLocal = [targetScopeModelFilesLocal; {[folderPath filesep dirData(i).name]}];
+                                                    ~(Simulink.MDLInfo(fileFullPath).IsLibrary))
+                             targetScopeModelFilesLocal = [targetScopeModelFilesLocal; {fileFullPath}];
                         end
                     end
                 end
             elseif isfile(targetScopeList{index})
                 targetScopeModelFilesLocal =[targetScopeModelFilesLocal; {targetScopeList{index}}];
             end
+            targetScopeModelFilesLocal = cellstr(targetScopeModelFilesLocal);
             targetScopeModelList = unique([targetScopeModelList; targetScopeModelFilesLocal]);
         catch exception
             status = 0; 
@@ -95,9 +112,12 @@ function [cloneResults, status] = findClonesOfSource(sourceBlocksPath, targetSco
         if ~isempty(cloneResultsPerModel.Clones)
             clonePatterns(indexModelForClones).ModelName = targetScopeModelList{index};
             cloneResults.Clones = cloneResults.Clones + cloneResultsPerModel.Clones.Summary.Clones;
-            cloneResults.BlocksInAllClones = cloneResults.BlocksInAllClones + (cloneResultsPerModel.Clones.CloneGroups.Summary.Clones * cloneResultsPerModel.Clones.CloneGroups.Summary.BlocksPerClone);
+            cloneResults.BlocksInAllClones = cloneResults.BlocksInAllClones +...
+                (cloneResultsPerModel.Clones.CloneGroups.Summary.Clones *...
+                cloneResultsPerModel.Clones.CloneGroups.Summary.BlocksPerClone);
             for len = 1 : length(cloneResultsPerModel.Clones.CloneGroups.CloneList)
-                clonePatterns(indexModelForClones).ClonePattern{len} = cloneResultsPerModel.Clones.CloneGroups.CloneList{len}.PatternBlocks;
+                clonePatterns(indexModelForClones).ClonePattern{len} =...
+                    cloneResultsPerModel.Clones.CloneGroups.CloneList{len}.PatternBlocks;
             end
             indexModelForClones = indexModelForClones + 1;
         end
@@ -153,6 +173,10 @@ function [tempSubsysFullPath, tempLibraryName] = createTempLibraryAndSubsys(bloc
         error('You do not have write permission in the current working directory.');
     end
 
+    % If the pattern was selected (and copied) from a library, remove the
+    % library link.
+    breakLibraryLink(tempSubsystemPath, tempLibraryName);
+
     % Find the block handles of the blocks to be included in the new subsystem
     blockHandles = [];
     for i = 1:length(blockList)
@@ -182,3 +206,16 @@ function [tempSubsysFullPath, tempLibraryName] = createTempLibraryAndSubsys(bloc
     save_system(tempLibraryName);
 end
 
+function breakLibraryLink(subsystemPath, modelName)
+    % Check if the subsystem is a linked library block
+    linkStatus = get_param(subsystemPath, 'LinkStatus');
+    
+    % If the subsystem is a linked library block, break the link
+    if strcmp(linkStatus, 'resolved') || strcmp(linkStatus, 'implicit')
+        % Break the library link
+        set_param(subsystemPath, 'LinkStatus', 'none');
+        
+        % Save the changes to the model
+        save_system(modelName);
+    end
+end
